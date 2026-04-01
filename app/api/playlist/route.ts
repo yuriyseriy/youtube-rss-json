@@ -7,33 +7,37 @@ const parser = new XMLParser({
   isArray: (name) => name === "entry" || name === "link",
 });
 
+// Playlist ID formats:
+//   PL…  – regular user playlists  (PL + 32 chars, total 34)
+//   UU…  – channel uploads list    (UU + 22 chars, total 24)
+//   LL   – liked videos            (exactly "LL")
+//   FL   – favorites               (exactly "FL")
+//   RD…  – auto-generated mixes    (variable length)
+const PLAYLIST_ID_RE = /^[A-Za-z]{2}[a-zA-Z0-9_-]{0,52}$/;
+
 export async function GET(request: NextRequest) {
-  const channelId = request.nextUrl.searchParams.get("channelId");
+  const playlistId = request.nextUrl.searchParams.get("playlistId");
 
-  if (!channelId) {
+  if (!playlistId) {
     return Response.json(
-      { error: "Missing required query parameter: channelId" },
+      { error: "Missing required query parameter: playlistId" },
       { status: 400 }
     );
   }
 
-  // Basic channelId format validation: Must be 24 characters, alphanumeric, start with "UC"
-  if (
-    typeof channelId !== "string" ||
-    !/^UC[a-zA-Z0-9_-]{22}$/.test(channelId)
-  ) {
+  if (!PLAYLIST_ID_RE.test(playlistId)) {
     return Response.json(
-      { error: "Invalid channelId format" },
+      { error: "Invalid playlistId format" },
       { status: 400 }
     );
   }
 
-  const feedUrl = `https://www.youtube.com/feeds/videos.xml?channel_id=${channelId}`;
+  const feedUrl = `https://www.youtube.com/feeds/videos.xml?playlist_id=${playlistId}`;
   const res = await fetch(feedUrl, { next: { revalidate: 3600 } });
 
   if (res.status === 404) {
     return Response.json(
-      { error: `Channel not found: ${channelId}` },
+      { error: `Playlist not found: ${playlistId}` },
       { status: 404 }
     );
   }
@@ -48,10 +52,11 @@ export async function GET(request: NextRequest) {
   const xml = await res.text();
   const { feed } = parser.parse(xml);
 
-  const channelUrl =
+  const playlistUrl =
     (feed.link as Array<{ "@rel": string; "@href": string }>)?.find(
       (l) => l["@rel"] === "alternate"
-    )?.["@href"] ?? `https://www.youtube.com/channel/${channelId}`;
+    )?.["@href"] ??
+    `https://www.youtube.com/playlist?list=${playlistId}`;
 
   const entries: unknown[] = Array.isArray(feed.entry)
     ? feed.entry
@@ -71,7 +76,8 @@ export async function GET(request: NextRequest) {
       url:
         (entry.link as Array<{ "@rel": string; "@href": string }>)?.find(
           (l) => l["@rel"] === "alternate"
-        )?.["@href"] ?? `https://www.youtube.com/watch?v=${entry["yt:videoId"]}`,
+        )?.["@href"] ??
+        `https://www.youtube.com/watch?v=${entry["yt:videoId"]}`,
       published: entry.published,
       updated: entry.updated,
       thumbnail: group["media:thumbnail"]?.["@url"] ?? null,
@@ -88,12 +94,15 @@ export async function GET(request: NextRequest) {
   });
 
   return Response.json({
-    feedUrl,
-    channel: {
-      id: feed["yt:channelId"],
+    playlist: {
+      id: playlistId,
       title: feed.title,
-      url: channelUrl,
-      published: feed.published,
+      url: playlistUrl,
+      author: {
+        name: feed.author?.name ?? null,
+        channelId: feed["yt:channelId"] ?? null,
+        url: feed.author?.uri ?? null,
+      },
     },
     videoCount: videos.length,
     videos,
